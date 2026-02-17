@@ -1,118 +1,310 @@
-from inspect import cleandoc
-class Example:
-    """
-    A example node
+import json
+import math
+import os
+import threading
+import time
+from pathlib import Path
 
-    Class methods
-    -------------
-    INPUT_TYPES (dict):
-        Tell the main program input parameters of nodes.
-    IS_CHANGED:
-        optional method to control when the node is re executed.
+from comfy.utils import ProgressBar
+import folder_paths
 
-    Attributes
-    ----------
-    RETURN_TYPES (`tuple`):
-        The type of each element in the output tulple.
-    RETURN_NAMES (`tuple`):
-        Optional: The name of each output in the output tulple.
-    FUNCTION (`str`):
-        The name of the entry-point method. For example, if `FUNCTION = "execute"` then it will run Example().execute()
-    OUTPUT_NODE ([`bool`]):
-        If this node is an output node that outputs a result/image from the graph. The SaveImage node is an example.
-        The backend iterates on these output nodes and tries to execute all their parents if their parent graph is properly connected.
-        Assumed to be False if not present.
-    CATEGORY (`str`):
-        The category the node should appear in the UI.
-    execute(s) -> tuple || None:
-        The entry point method. The name of this method must be the same as the value of property `FUNCTION`.
-        For example, if `FUNCTION = "execute"` then this method's name must be `execute`, if `FUNCTION = "foo"` then it must be `foo`.
-    """
-    def __init__(self):
-        pass
+CONFIG_PATH = Path(__file__).parent / "config.json"
+
+
+def get_api_key():
+    key = os.environ.get("UTHANA_API_KEY")
+    if key:
+        return key
+    if CONFIG_PATH.exists():
+        with open(CONFIG_PATH) as f:
+            cfg = json.load(f)
+            return cfg.get("api_key")
+    return None
+
+
+OUTPUT_FORMATS = ["GLB", "FBX"]
+
+
+_CHARACTER_NAMES = ["tar", "ava", "manny", "quinn", "y_bot"]
+
+
+def run_with_progress(fn, estimated_duration):
+    result = [None]
+    error = [None]
+
+    def run():
+        try:
+            result[0] = fn()
+        except Exception as e:
+            error[0] = e
+
+    thread = threading.Thread(target=run)
+    thread.start()
+
+    pbar = ProgressBar(100)
+    start = time.monotonic()
+    while thread.is_alive():
+        thread.join(timeout=0.5)
+        elapsed = time.monotonic() - start
+        t = elapsed / estimated_duration
+        if t < 0.9:
+            progress = t / 0.9 * 90
+        else:
+            overshoot = elapsed - estimated_duration * 0.9
+            progress = 100 - 10 * math.exp(-overshoot / 10)
+        pbar.update_absolute(int(progress))
+
+    pbar.update_absolute(100)
+
+    if error[0] is not None:
+        raise error[0]
+
+    return result[0]
+
+
+def resolve_character_id(value):
+    try:
+        import uthana
+    except ImportError:
+        raise ImportError("This node requires uthana. Install with: pip install uthana")
+
+    resolved = getattr(uthana.DefaultCharacters(), value, None)
+    if resolved is not None:
+        return resolved
+    if value.startswith("c"):
+        return value
+    raise uthana.Error(
+        f"Invalid character_id: '{value}'. Use a name ({', '.join(_CHARACTER_NAMES)}) or a character ID starting with 'c'."
+    )
+
+
+class TextToMotionVqvaeV1:
+    """Generate motion from text prompt using Uthana text-to-motion vqvae-v1 model"""
 
     @classmethod
     def INPUT_TYPES(s):
-        """
-            Return a dictionary which contains config for all input fields.
-            Some types (string): "MODEL", "VAE", "CLIP", "CONDITIONING", "LATENT", "IMAGE", "INT", "STRING", "FLOAT".
-            Input types "INT", "STRING" or "FLOAT" are special values for fields on the node.
-            The type can be a list for selection.
-
-            Returns: `dict`:
-                - Key input_fields_group (`string`): Can be either required, hidden or optional. A node class must have property `required`
-                - Value input_fields (`dict`): Contains input fields config:
-                    * Key field_name (`string`): Name of a entry-point method's argument
-                    * Value field_config (`tuple`):
-                        + First value is a string indicate the type of field or a list for selection.
-                        + Secound value is a config for type "INT", "STRING" or "FLOAT".
-        """
         return {
             "required": {
-                "image": ("Image", { "tooltip": "This is an image"}),
-                "int_field": ("INT", {
-                    "default": 0,
-                    "min": 0, #Minimum value
-                    "max": 4096, #Maximum value
-                    "step": 64, #Slider's step
-                    "display": "number" # Cosmetic only: display as "number" or "slider"
-                }),
-                "float_field": ("FLOAT", {
-                    "default": 1.0,
-                    "min": 0.0,
-                    "max": 10.0,
-                    "step": 0.01,
-                    "round": 0.001, #The value represeting the precision to round to, will be set to the step value by default. Can be set to False to disable rounding.
-                    "display": "number"}),
-                "print_to_screen": (["enable", "disable"],),
-                "string_field": ("STRING", {
-                    "multiline": False, #True if you want the field to look like the one on the ClipTextEncode node
-                    "default": "Hello World!"
-                }),
+                "prompt": ("STRING", {"multiline": True, "default": ""}),
+                "character_id": ("STRING", {"default": "tar"}),
+                "foot_ik": ("BOOLEAN", {"default": True}),
+                "staging": ("BOOLEAN", {"default": False}),
             },
         }
 
-    RETURN_TYPES = ("IMAGE",)
-    #RETURN_NAMES = ("image_output_name",)
-    DESCRIPTION = cleandoc(__doc__)
-    FUNCTION = "test"
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("character_id", "motion_id")
+    OUTPUT_NODE = True
+    FUNCTION = "execute"
+    CATEGORY = "Uthana"
 
-    #OUTPUT_NODE = False
-    #OUTPUT_TOOLTIPS = ("",) # Tooltips for the output node
+    def execute(self, prompt, character_id, foot_ik, staging):
+        try:
+            import uthana
+        except ImportError:
+            raise ImportError("This node requires uthana. Install with: pip install uthana")
 
-    CATEGORY = "Example"
+        client = uthana.Client(get_api_key(), staging=staging)
+        result = run_with_progress(
+            lambda: client.create_text_to_motion(
+                "vqvae-v1",
+                prompt,
+                character_id=resolve_character_id(character_id),
+                foot_ik=foot_ik,
+            ),
+            estimated_duration=10.0,
+        )
 
-    def test(self, image, string_field, int_field, float_field, print_to_screen):
-        if print_to_screen == "enable":
-            print(f"""Your input contains:
-                string_field aka input text: {string_field}
-                int_field: {int_field}
-                float_field: {float_field}
-            """)
-        #do some processing on the image, in this example I just invert it
-        image = 1.0 - image
-        return (image,)
-
-    """
-        The node will always be re executed if any of the inputs change but
-        this method can be used to force the node to execute again even when the inputs don't change.
-        You can make this node return a number or a string. This value will be compared to the one returned the last time the node was
-        executed, if it is different the node will be executed again.
-        This method is used in the core repo for the LoadImage node where they return the image hash as a string, if the image hash
-        changes between executions the LoadImage node is executed again.
-    """
-    #@classmethod
-    #def IS_CHANGED(s, image, string_field, int_field, float_field, print_to_screen):
-    #    return ""
+        return (result.character_id, result.motion_id)
 
 
-# A dictionary that contains all nodes you want to export with their names
-# NOTE: names should be globally unique
+class TextToMotionDiffusionV2:
+    """Generate motion from text prompt using Uthana text-to-motion diffusion-v2 model with extended controls"""
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "prompt": ("STRING", {"multiline": True, "default": ""}),
+                "character_id": ("STRING", {"default": "tar"}),
+                "foot_ik": ("BOOLEAN", {"default": True}),
+                "motion_length": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 10.0, "step": 0.01}),
+                "cfg_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 2147483647, "step": 1}),
+                "internal_ik": ("BOOLEAN", {"default": True}),
+                "staging": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("character_id", "motion_id")
+    OUTPUT_NODE = True
+    FUNCTION = "execute"
+    CATEGORY = "Uthana"
+
+    def execute(self, prompt, character_id, foot_ik, motion_length, cfg_scale, seed, internal_ik, staging):
+        try:
+            import uthana
+        except ImportError:
+            raise ImportError("This node requires uthana. Install with: pip install uthana")
+
+        client = uthana.Client(get_api_key(), staging=staging)
+        result = run_with_progress(
+            lambda: client.create_text_to_motion(
+                "diffusion-v2",
+                prompt,
+                character_id=resolve_character_id(character_id),
+                foot_ik=foot_ik,
+                length=motion_length,
+                cfg_scale=cfg_scale,
+                seed=seed,
+                internal_ik=internal_ik,
+            ),
+            estimated_duration=10.0,
+        )
+
+        return (result.character_id, result.motion_id)
+
+
+class DownloadMotion:
+    """Download a motion file from Uthana API"""
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "character_id": ("STRING", {"default": ""}),
+                "motion_id": ("STRING", {"default": ""}),
+                "output_format": (OUTPUT_FORMATS, {"default": "GLB"}),
+                "fps": ("INT", {"default": 24, "min": 1, "max": 120, "step": 1}),
+                "no_mesh": ("BOOLEAN", {"default": True}),
+                "staging": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("file_path",)
+    OUTPUT_NODE = True
+    FUNCTION = "execute"
+    CATEGORY = "Uthana"
+
+    def execute(self, character_id, motion_id, output_format, fps, no_mesh, staging):
+        try:
+            import uthana
+        except ImportError:
+            raise ImportError("This node requires uthana. Install with: pip install uthana")
+
+        client = uthana.Client(get_api_key(), staging=staging)
+        ext = output_format.lower()
+        content = client.download_motion(
+            character_id,
+            motion_id,
+            output_format=ext,
+            fps=fps,
+            no_mesh=no_mesh,
+        )
+
+        output_dir = folder_paths.get_output_directory()
+        filename = f"{character_id}-{motion_id}.{ext}"
+        filepath = os.path.join(output_dir, filename)
+        with open(filepath, "wb") as f:
+            f.write(content)
+
+        return (filepath,)
+
+
+class CreateCharacter:
+    """Auto-rig a 3D mesh using Uthana API"""
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "file_path": ("STRING", {"default": ""}),
+                "auto_rig": ("BOOLEAN", {"default": True}),
+                "front_facing": ("BOOLEAN", {"default": True}),
+                "staging": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "FLOAT")
+    RETURN_NAMES = ("character_id", "url", "auto_rig_confidence")
+    OUTPUT_NODE = True
+    FUNCTION = "execute"
+    CATEGORY = "Uthana"
+
+    def execute(self, file_path, auto_rig, front_facing, staging):
+        if not os.path.isabs(file_path):
+            for d in [folder_paths.get_output_directory(), folder_paths.get_input_directory()]:
+                candidate = os.path.join(d, file_path)
+                if os.path.isfile(candidate):
+                    file_path = candidate
+                    break
+
+        try:
+            import uthana
+        except ImportError:
+            raise ImportError("This node requires uthana. Install with: pip install uthana")
+
+        client = uthana.Client(get_api_key(), staging=staging)
+        char_output = run_with_progress(
+            lambda: client.create_character(file_path, auto_rig=auto_rig, front_facing=front_facing),
+            estimated_duration=60.0,
+        )
+
+        return (char_output.character_id, char_output.url, char_output.auto_rig_confidence)
+
+
+class DownloadCharacter:
+    """Download a rigged character from Uthana API"""
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "character_id": ("STRING", {"default": ""}),
+                "output_format": (OUTPUT_FORMATS, {"default": "GLB"}),
+                "staging": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("file_path",)
+    OUTPUT_NODE = True
+    FUNCTION = "execute"
+    CATEGORY = "Uthana"
+
+    def execute(self, character_id, output_format, staging):
+        try:
+            import uthana
+        except ImportError:
+            raise ImportError("This node requires uthana. Install with: pip install uthana")
+
+        client = uthana.Client(get_api_key(), staging=staging)
+        ext = output_format.lower()
+        content = client.download_character(character_id, output_format=ext)
+
+        output_dir = folder_paths.get_output_directory()
+        filename = f"{character_id}-character.{ext}"
+        filepath = os.path.join(output_dir, filename)
+        with open(filepath, "wb") as f:
+            f.write(content)
+
+        return (filepath,)
+
+
 NODE_CLASS_MAPPINGS = {
-    "Example": Example
+    "TextToMotionVqvaeV1": TextToMotionVqvaeV1,
+    "TextToMotionDiffusionV2": TextToMotionDiffusionV2,
+    "DownloadMotion": DownloadMotion,
+    "CreateCharacter": CreateCharacter,
+    "DownloadCharacter": DownloadCharacter,
 }
 
-# A dictionary that contains the friendly/humanly readable titles for the nodes
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "Example": "Example Node"
+    "TextToMotionVqvaeV1": "Text to Motion VQVAE v1",
+    "TextToMotionDiffusionV2": "Text to Motion Diffusion v2",
+    "DownloadMotion": "Download Motion",
+    "CreateCharacter": "Create Character",
+    "DownloadCharacter": "Download Character",
 }
