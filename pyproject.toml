@@ -3,7 +3,7 @@ requires = ["setuptools>=70.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "uthana_nodepack"
+name = "uthana_comfy"
 version = "0.0.1"
 description = "A collection of custom nodes for ComfyUI"
 authors = [
@@ -30,17 +30,17 @@ dev = [
 ]
 
 [project.urls]
-Repository = "https://github.com/hyperlogic/uthana_nodepack"
-BugTracker = "https://github.com/hyperlogic/uthana_nodepack/issues"
-Documentation = "https://github.com/hyperlogic/uthana_nodepack/wiki"
+Repository = "https://github.com/Uthana/uthana-comfy"
+BugTracker = "https://github.com/Uthana/uthana-comfy/issues"
+Documentation = "https://github.com/Uthana/uthana-comfy/wiki"
 
 
 [tool.comfy]
-PublisherId = "hyperlogic"
-DisplayName = "Uthana Nodepack"
+PublisherId = "Uthana"
+DisplayName = "Uthana Comfy Nodepack"
 Icon = ""
 Tags = []
-Repository = "https://github.com/hyperlogic/uthana_nodepack"
+Repository = "https://github.com/Uthana/uthana-comfy"
 
 includes = []
 
