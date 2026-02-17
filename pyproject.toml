@@ -17,16 +17,9 @@ dependencies = [
     "uthana>=0.1.6",
 ]
 
-
-
 [project.optional-dependencies]
 dev = [
-    "bump-my-version",
-    "coverage",  # testing
-    "mypy",  # linting
-    "pre-commit", # runs linting on commit
-    "pytest",  # testing
-    "ruff",  # linting
+    "pytest",  # todo
 ]
 
 [project.urls]

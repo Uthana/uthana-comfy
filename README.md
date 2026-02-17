@@ -24,7 +24,14 @@ To install the dev dependencies:
 ```bash
 cd uthana-comfy
 pip install -e .[dev]
-pre-commit install
 ```
 
 The `-e` flag above will result in a "live" install, in the sense that any changes you make to your node extension will automatically be picked up the next time you run ComfyUI.
+
+For these nodes to be available within a Comfy you must symlink them:
+
+```bash
+ln -s /path/to/uthana-comfy /path/to/ComfyUI/custom_nodes/uthana-comfy
+```
+
+
