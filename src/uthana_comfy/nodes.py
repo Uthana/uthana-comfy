@@ -3,6 +3,8 @@ import math
 import os
 import threading
 import time
+import io
+import tempfile
 from pathlib import Path
 
 from comfy.utils import ProgressBar
@@ -165,6 +167,124 @@ class TextToMotionDiffusionV2:
 
         return (result.character_id, result.motion_id)
 
+class VideoToMotion:
+    """Generate motion from a video using Uthana video-to-motion model"""
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "motion_name": ("STRING", {"default": "", "multiline": False}),
+                "max_wait_seconds": (
+                    "FLOAT",
+                    {"default": 600.0, "min": 30.0, "max": 3600.0, "step": 30.0},
+                ),
+            },
+            "optional": {
+                "video": ("VIDEO", {}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("motion_id",)
+    FUNCTION = "execute"
+    CATEGORY = "Uthana"
+
+    @staticmethod
+    def path_from_video(video: object) -> tuple[str, str | None]:
+        """Resolve a Comfy Video input to a filesystem path for upload. Returns (path, tmp_to_delete)."""
+        src = video.get_stream_source()
+        if isinstance(src, str):
+            p = os.path.abspath(os.path.expanduser(src))
+            if not os.path.isfile(p):
+                raise RuntimeError(f"Video file not found: {p}")
+            return (p, None)
+        if isinstance(src, io.BytesIO):
+            src.seek(0)
+            data = src.read()
+            ext = "mp4"
+            try:
+                if hasattr(video, "get_container_format"):
+                    name = (video.get_container_format() or "mp4").lower()
+                    if name in ("mov", "avi", "mp4"):
+                        ext = name
+            except Exception:
+                pass
+            with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as tf:
+                tf.write(data)
+                tmp = tf.name
+            return (tmp, tmp)
+        raise RuntimeError(f"Unsupported video source type: {type(src)!r}")
+
+    @staticmethod
+    def parse_video_to_motion_result(result: object) -> str:
+        """Get motion_id from a finished create_video_to_motion job result."""
+        if result is None:
+            raise RuntimeError("Video-to-motion job finished but result is empty.")
+        if isinstance(result, str):
+            result = json.loads(result)
+        if not isinstance(result, dict):
+            raise RuntimeError(f"Unexpected job result type: {type(result)!r}")
+
+        payload = result.get("result") if isinstance(result.get("result"), dict) else result
+        motion_id = payload.get("motion_id") or payload.get("id")
+        if not motion_id:
+            raise RuntimeError(f"Could not parse motion id from job result: {result!r}")
+        return str(motion_id)
+
+    def execute(
+        self,
+        motion_name: str,
+        max_wait_seconds: float,
+        video=None,
+        staging: bool = False,
+    ):
+        try:
+            import uthana
+        except ImportError:
+            raise ImportError("This node requires uthana. Install with: pip install uthana")
+
+        client = uthana.Client(get_api_key(), staging=staging)
+
+        path: str
+        tmp_to_remove: str | None = None
+        if video is None:
+            raise RuntimeError("Connect Load Video (video) to a file on disk.")
+        path, tmp_to_remove = self.path_from_video(video)
+        name = (motion_name or "").strip() or None
+
+        try:
+            job = client.create_video_to_motion(path, motion_name=name)
+            job_id = job.job_id
+            deadline = time.monotonic() + float(max_wait_seconds)
+            poll_s = 5.0
+            while True:
+                st = (job.status or "").upper()
+                if st == "FINISHED":
+                    if job.result is None:
+                        job = client.get_job(job_id)
+                    break
+                if st == "FAILED":
+                    raise RuntimeError(
+                        f"Video-to-motion job failed (job_id={job_id!r}, result={job.result!r})"
+                    )
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        f"Video-to-motion job timed out after {max_wait_seconds}s "
+                        f"(job_id={job_id!r}, last_status={job.status!r})"
+                    )
+                time.sleep(poll_s)
+                job = client.get_job(job_id)
+            if job.result is None:
+                job = client.get_job(job_id)
+            mid = self.parse_video_to_motion_result(job.result)
+            return (mid,)
+        finally:
+            if tmp_to_remove and os.path.isfile(tmp_to_remove):
+                try:
+                    os.unlink(tmp_to_remove)
+                except OSError:
+                    pass
+
 
 class DownloadMotion:
     """Download a motion file from Uthana API"""
@@ -299,6 +419,7 @@ NODE_CLASS_MAPPINGS = {
     "DownloadMotion": DownloadMotion,
     "CreateCharacter": CreateCharacter,
     "DownloadCharacter": DownloadCharacter,
+    "VideoToMotion": VideoToMotion,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -307,4 +428,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "DownloadMotion": "Download Motion",
     "CreateCharacter": "Create Character",
     "DownloadCharacter": "Download Character",
+    "VideoToMotion": "Video to Motion",
 }
