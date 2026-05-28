@@ -224,9 +224,8 @@ class VideoToMotion:
             result = json.loads(result)
         if not isinstance(result, dict):
             raise RuntimeError(f"Unexpected job result type: {type(result)!r}")
-
-        payload = result.get("result") if isinstance(result.get("result"), dict) else result
-        motion_id = payload.get("motion_id") or payload.get("id")
+        result = result.get("result") or {}
+        motion_id = result.get("id")
         if not motion_id:
             raise RuntimeError(f"Could not parse motion id from job result: {result!r}")
         return str(motion_id)
