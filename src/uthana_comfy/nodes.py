@@ -1,14 +1,14 @@
+import io
 import json
 import math
 import os
+import tempfile
 import threading
 import time
-import io
-import tempfile
 from pathlib import Path
 
-from comfy.utils import ProgressBar
 import folder_paths
+from comfy.utils import ProgressBar
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
 
