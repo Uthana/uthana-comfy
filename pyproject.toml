@@ -14,7 +14,7 @@ license = {text = "Apache Software License 2.0"}
 requires-python = ">=3.10"
 classifiers = []
 dependencies = [
-    "uthana>=0.1.6",
+    "uthana>=0.3.1",
 ]
 
 [project.optional-dependencies]

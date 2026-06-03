@@ -1,14 +1,16 @@
-import io
 import json
 import math
 import os
-import tempfile
+import asyncio
 import threading
 import time
+import io
+import tempfile
+import random
 from pathlib import Path
 
-import folder_paths
 from comfy.utils import ProgressBar
+import folder_paths
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
 
@@ -70,7 +72,7 @@ def resolve_character_id(value):
     except ImportError:
         raise ImportError("This node requires uthana. Install with: pip install uthana")
 
-    resolved = getattr(uthana.DefaultCharacters(), value, None)
+    resolved = getattr(uthana.UthanaCharacters(), value, None)
     if resolved is not None:
         return resolved
     if value.startswith("c"):
@@ -80,61 +82,20 @@ def resolve_character_id(value):
     )
 
 
-class TextToMotionVqvaeV1:
+class TextToMotion:
     """Generate motion from text prompt using Uthana text-to-motion vqvae-v1 model"""
 
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "prompt": ("STRING", {"multiline": True, "default": ""}),
+                "prompt": ("STRING", {"multiline": True, "default": "A person"}),
+                "model": (["vqvae-v1", "diffusion-v2"], {"default": "vqvae-v1"}),
                 "character_id": ("STRING", {"default": "tar"}),
                 "foot_ik": ("BOOLEAN", {"default": True}),
-                "staging": ("BOOLEAN", {"default": False}),
-            },
-        }
-
-    RETURN_TYPES = ("STRING", "STRING")
-    RETURN_NAMES = ("character_id", "motion_id")
-    OUTPUT_NODE = True
-    FUNCTION = "execute"
-    CATEGORY = "Uthana"
-
-    def execute(self, prompt, character_id, foot_ik, staging):
-        try:
-            import uthana
-        except ImportError:
-            raise ImportError("This node requires uthana. Install with: pip install uthana")
-
-        client = uthana.Client(get_api_key(), staging=staging)
-        result = run_with_progress(
-            lambda: client.create_text_to_motion(
-                "vqvae-v1",
-                prompt,
-                character_id=resolve_character_id(character_id),
-                foot_ik=foot_ik,
-            ),
-            estimated_duration=10.0,
-        )
-
-        return (result.character_id, result.motion_id)
-
-
-class TextToMotionDiffusionV2:
-    """Generate motion from text prompt using Uthana text-to-motion diffusion-v2 model with extended controls"""
-
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "prompt": ("STRING", {"multiline": True, "default": ""}),
-                "character_id": ("STRING", {"default": "tar"}),
-                "foot_ik": ("BOOLEAN", {"default": True}),
-                "motion_length": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 10.0, "step": 0.01}),
-                "cfg_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01}),
-                "seed": ("INT", {"default": 0, "min": 0, "max": 2147483647, "step": 1}),
+                "cfg_scale": ("FLOAT", {"default": 2.0, "min": 0.0, "max": 10.0, "step": 1.0}),
+                "seed": ("INT", {"default": random.randint(1, 99999), "min": 1, "max": 99999, "step": 1}),
                 "internal_ik": ("BOOLEAN", {"default": True}),
-                "staging": ("BOOLEAN", {"default": False}),
             },
         }
 
@@ -144,28 +105,25 @@ class TextToMotionDiffusionV2:
     FUNCTION = "execute"
     CATEGORY = "Uthana"
 
-    def execute(self, prompt, character_id, foot_ik, motion_length, cfg_scale, seed, internal_ik, staging):
+    async def execute(self, prompt, model, character_id, foot_ik, cfg_scale, seed, internal_ik):
         try:
             import uthana
         except ImportError:
             raise ImportError("This node requires uthana. Install with: pip install uthana")
 
-        client = uthana.Client(get_api_key(), staging=staging)
-        result = run_with_progress(
-            lambda: client.create_text_to_motion(
-                "diffusion-v2",
-                prompt,
-                character_id=resolve_character_id(character_id),
-                foot_ik=foot_ik,
-                length=motion_length,
-                cfg_scale=cfg_scale,
-                seed=seed,
-                internal_ik=internal_ik,
-            ),
-            estimated_duration=10.0,
+        client = uthana.Client(get_api_key())
+        result = await client.ttm.create(
+            prompt=prompt,
+            model=model,
+            character_id=resolve_character_id(character_id),
+            foot_ik=foot_ik,
+            cfg_scale=cfg_scale,
+            seed=seed,
+            internal_ik=internal_ik,
         )
 
         return (result.character_id, result.motion_id)
+
 
 class VideoToMotion:
     """Generate motion from a video using Uthana video-to-motion model"""
@@ -174,10 +132,7 @@ class VideoToMotion:
         return {
             "required": {
                 "motion_name": ("STRING", {"default": "", "multiline": False}),
-                "max_wait_seconds": (
-                    "FLOAT",
-                    {"default": 600.0, "min": 30.0, "max": 3600.0, "step": 30.0},
-                ),
+                "model": (["video-to-motion-v2"], {"default": "video-to-motion-v2"}),
             },
             "optional": {
                 "video": ("VIDEO", {}),
@@ -224,26 +179,25 @@ class VideoToMotion:
             result = json.loads(result)
         if not isinstance(result, dict):
             raise RuntimeError(f"Unexpected job result type: {type(result)!r}")
-        result = result.get("result") or {}
-        motion_id = result.get("id")
+
+        payload = result.get("result") if isinstance(result.get("result"), dict) else result
+        motion_id = payload.get("motion_id") or payload.get("id")
         if not motion_id:
             raise RuntimeError(f"Could not parse motion id from job result: {result!r}")
         return str(motion_id)
 
-    def execute(
+    async def execute(
         self,
         motion_name: str,
-        max_wait_seconds: float,
+        model: str,
         video=None,
-        staging: bool = False,
     ):
         try:
             import uthana
         except ImportError:
             raise ImportError("This node requires uthana. Install with: pip install uthana")
 
-        client = uthana.Client(get_api_key(), staging=staging)
-
+        client = uthana.Client(get_api_key())
         path: str
         tmp_to_remove: str | None = None
         if video is None:
@@ -252,31 +206,22 @@ class VideoToMotion:
         name = (motion_name or "").strip() or None
 
         try:
-            job = client.create_video_to_motion(path, motion_name=name)
-            job_id = job.job_id
-            deadline = time.monotonic() + float(max_wait_seconds)
-            poll_s = 5.0
-            while True:
-                st = (job.status or "").upper()
-                if st == "FINISHED":
-                    if job.result is None:
-                        job = client.get_job(job_id)
-                    break
-                if st == "FAILED":
-                    raise RuntimeError(
-                        f"Video-to-motion job failed (job_id={job_id!r}, result={job.result!r})"
-                    )
-                if time.monotonic() >= deadline:
-                    raise RuntimeError(
-                        f"Video-to-motion job timed out after {max_wait_seconds}s "
-                        f"(job_id={job_id!r}, last_status={job.status!r})"
-                    )
-                time.sleep(poll_s)
-                job = client.get_job(job_id)
-            if job.result is None:
-                job = client.get_job(job_id)
-            mid = self.parse_video_to_motion_result(job.result)
-            return (mid,)
+            job = await client.vtm.create(path, motion_name=name, model=model)
+            job_id = job.get("id")
+            if not job_id:
+                raise RuntimeError(f"Video-to-motion create did not return a job id: {job!r}")
+            while str(job.get("status") or "").upper() not in ("FINISHED", "FAILED"):
+                await asyncio.sleep(5.0)
+                job = await client.jobs.get(job["id"])
+            if str(job.get("status") or "").upper() == "FINISHED":
+                if job.get("result") is None:
+                    job = await client.jobs.get(job_id)
+                mid = self.parse_video_to_motion_result(job.get("result"))
+                return (mid,)
+            if str(job.get("status") or "").upper() == "FAILED":
+                raise RuntimeError(
+                    f"Video-to-motion job failed (job_id={job_id!r}, status={job.get('status')!r}, result={job.get('result')!r})"
+                )
         finally:
             if tmp_to_remove and os.path.isfile(tmp_to_remove):
                 try:
@@ -292,12 +237,11 @@ class DownloadMotion:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "character_id": ("STRING", {"default": ""}),
+                "character_id": ("STRING", {"default": "c7uJKSavZ5aC"}),
                 "motion_id": ("STRING", {"default": ""}),
                 "output_format": (OUTPUT_FORMATS, {"default": "GLB"}),
                 "fps": ("INT", {"default": 24, "min": 1, "max": 120, "step": 1}),
                 "no_mesh": ("BOOLEAN", {"default": True}),
-                "staging": ("BOOLEAN", {"default": False}),
             },
         }
 
@@ -307,15 +251,15 @@ class DownloadMotion:
     FUNCTION = "execute"
     CATEGORY = "Uthana"
 
-    def execute(self, character_id, motion_id, output_format, fps, no_mesh, staging):
+    async def execute(self, character_id, motion_id, output_format, fps, no_mesh):
         try:
             import uthana
         except ImportError:
             raise ImportError("This node requires uthana. Install with: pip install uthana")
 
-        client = uthana.Client(get_api_key(), staging=staging)
+        client = uthana.Client(get_api_key())
         ext = output_format.lower()
-        content = client.download_motion(
+        content = await client.motions.download(
             character_id,
             motion_id,
             output_format=ext,
@@ -342,7 +286,8 @@ class CreateCharacter:
                 "file_path": ("STRING", {"default": ""}),
                 "auto_rig": ("BOOLEAN", {"default": True}),
                 "front_facing": ("BOOLEAN", {"default": True}),
-                "staging": ("BOOLEAN", {"default": False}),
+                "rerig_target": ("STRING", {"default": ""}),
+                "include_fingers": ("BOOLEAN", {"default": True}),
             },
         }
 
@@ -352,7 +297,7 @@ class CreateCharacter:
     FUNCTION = "execute"
     CATEGORY = "Uthana"
 
-    def execute(self, file_path, auto_rig, front_facing, staging):
+    async def execute(self, file_path, auto_rig, front_facing, rerig_target, include_fingers):
         if not os.path.isabs(file_path):
             for d in [folder_paths.get_output_directory(), folder_paths.get_input_directory()]:
                 candidate = os.path.join(d, file_path)
@@ -365,11 +310,9 @@ class CreateCharacter:
         except ImportError:
             raise ImportError("This node requires uthana. Install with: pip install uthana")
 
-        client = uthana.Client(get_api_key(), staging=staging)
-        char_output = run_with_progress(
-            lambda: client.create_character(file_path, auto_rig=auto_rig, front_facing=front_facing),
-            estimated_duration=60.0,
-        )
+        client = uthana.Client(get_api_key())
+        rerig_target = (rerig_target or "").strip() or None
+        char_output = await client.characters.create_from_file(file_path, auto_rig=auto_rig, front_facing=front_facing, rerig_target=rerig_target, include_fingers=include_fingers)
 
         return (char_output.character_id, char_output.url, char_output.auto_rig_confidence)
 
@@ -383,7 +326,6 @@ class DownloadCharacter:
             "required": {
                 "character_id": ("STRING", {"default": ""}),
                 "output_format": (OUTPUT_FORMATS, {"default": "GLB"}),
-                "staging": ("BOOLEAN", {"default": False}),
             },
         }
 
@@ -393,15 +335,15 @@ class DownloadCharacter:
     FUNCTION = "execute"
     CATEGORY = "Uthana"
 
-    def execute(self, character_id, output_format, staging):
+    async def execute(self, character_id, output_format):
         try:
             import uthana
         except ImportError:
             raise ImportError("This node requires uthana. Install with: pip install uthana")
 
-        client = uthana.Client(get_api_key(), staging=staging)
+        client = uthana.Client(get_api_key())
         ext = output_format.lower()
-        content = client.download_character(character_id, output_format=ext)
+        content = await client.characters.download(character_id, output_format=ext)
 
         output_dir = folder_paths.get_output_directory()
         filename = f"{character_id}-character.{ext}"
@@ -413,8 +355,7 @@ class DownloadCharacter:
 
 
 NODE_CLASS_MAPPINGS = {
-    "TextToMotionVqvaeV1": TextToMotionVqvaeV1,
-    "TextToMotionDiffusionV2": TextToMotionDiffusionV2,
+    "TextToMotion": TextToMotion,
     "DownloadMotion": DownloadMotion,
     "CreateCharacter": CreateCharacter,
     "DownloadCharacter": DownloadCharacter,
@@ -422,8 +363,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "TextToMotionVqvaeV1": "Text to Motion VQVAE v1",
-    "TextToMotionDiffusionV2": "Text to Motion Diffusion v2",
+    "TextToMotion": "Text to Motion",
     "DownloadMotion": "Download Motion",
     "CreateCharacter": "Create Character",
     "DownloadCharacter": "Download Character",
