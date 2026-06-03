@@ -131,11 +131,9 @@ class VideoToMotion:
     def INPUT_TYPES(s):
         return {
             "required": {
+                "video": ("VIDEO", {}),
                 "motion_name": ("STRING", {"default": "", "multiline": False}),
                 "model": (["video-to-motion-v2"], {"default": "video-to-motion-v2"}),
-            },
-            "optional": {
-                "video": ("VIDEO", {}),
             },
         }
 
@@ -188,9 +186,9 @@ class VideoToMotion:
 
     async def execute(
         self,
+        video: object,
         motion_name: str,
         model: str,
-        video=None,
     ):
         try:
             import uthana
